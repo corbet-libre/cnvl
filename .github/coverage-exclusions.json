@@ -8,7 +8,7 @@
   },
   {
     "file": "src/lib.rs",
-    "line": 207,
+    "line": 220,
     "source": ".map_err(|_| Error::Authentication)?;",
     "reason": "RustCrypto XChaCha20-Poly1305 encryption only rejects inputs exceeding its counter bound; the prior 1 MiB bound is smaller. Allocation failure aborts rather than returning this error.",
     "evidence": "docs/COVERAGE.md#unreachable-defensive-mappings"

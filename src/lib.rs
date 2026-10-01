@@ -143,9 +143,15 @@ pub trait KeyRecipient {
 }
 
 /// An authenticated envelope after `open`, or untrusted ciphertext before it.
+/// Decoding is possible only through the bounded constructor.
+/// ```compile_fail
+/// let _: cnvl::Envelope = serde_json::from_slice(b"{}").unwrap();
+/// ```
+pub struct Envelope(Wire);
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Envelope {
+struct Wire {
     version: u8,
     context: Context,
     nonce: [u8; 24],
@@ -157,19 +163,26 @@ impl std::fmt::Debug for Envelope {
     }
 }
 impl Envelope {
+    /// Check the complete authenticated-header context before retaining a publication.
+    /// This does not authenticate ciphertext or grant permission to open it.
+    pub fn matches_context(&self, expected: &Context) -> bool {
+        &self.0.context == expected
+    }
     /// Serialize for publication. The outer profile signature binds these exact bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        serde_json::to_vec(self).map_err(|_| Error::Context)
+        serde_json::to_vec(&self.0).map_err(|_| Error::Context)
     }
     /// Bound before deserialization; unknown or duplicate fields fail closed.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() > MAX_ENVELOPE_BYTES {
             return Err(Error::Limit);
         }
-        let envelope: Self = serde_json::from_slice(bytes).map_err(|_| Error::Context)?;
+        let envelope: Wire = serde_json::from_slice(bytes).map_err(|_| Error::Context)?;
         envelope.validate()?;
-        Ok(envelope)
+        Ok(Self(envelope))
     }
+}
+impl Wire {
     fn validate(&self) -> Result<(), Error> {
         if self.version != 1 {
             return Err(Error::Context);
@@ -210,12 +223,12 @@ pub fn seal(
         context: context.clone(),
     };
     Ok((
-        Envelope {
+        Envelope(Wire {
             version: 1,
             context,
             nonce,
             ciphertext,
-        },
+        }),
         reader,
     ))
 }
@@ -226,17 +239,17 @@ pub fn open(
     key: &ReadKey,
     expected: &Context,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    envelope.validate()?;
-    if &envelope.context != expected || &key.context != expected {
+    envelope.0.validate()?;
+    if &envelope.0.context != expected || &key.context != expected {
         return Err(Error::Context);
     }
     let aad = expected.aad()?;
     let cipher = XChaCha20Poly1305::new(&(*key.secret).into());
     cipher
         .decrypt(
-            &XNonce::from(envelope.nonce),
+            &XNonce::from(envelope.0.nonce),
             Payload {
-                msg: &envelope.ciphertext,
+                msg: &envelope.0.ciphertext,
                 aad: &aad,
             },
         )

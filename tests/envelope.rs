@@ -24,6 +24,10 @@ fn key() -> SealKey {
 fn round_trip_exact_bytes_and_vault_custody() {
     let signed = b" { \"payload\": \"exact original signed bytes\" } ";
     let (envelope, reader) = seal(key(), context(), signed, &mut SystemEntropy).unwrap();
+    assert!(envelope.matches_context(&context()));
+    let mut other_context = context();
+    other_context.profile_revision += 1;
+    assert!(!envelope.matches_context(&other_context));
     let wire = envelope.to_bytes().unwrap();
     let envelope = Envelope::from_bytes(&wire).unwrap();
     assert_eq!(

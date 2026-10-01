@@ -35,3 +35,7 @@ Tests execute identical real crypto vectors natively and in Chrome Wasm. Indepen
 security review and production custody/G3/Exchange integration remain acceptance
 gates. Compression/padding are the existing cprz owner's responsibility; no codec
 or substitute policy implementation is supplied here.
+
+Envelope exposes no serde Deserialize implementation. Its private wire DTO is
+reachable only after from_bytes checks the encoded bound. The compile-fail vector
+checks that callers cannot bypass this constructor through generic serde APIs.
