@@ -58,6 +58,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-coverage-runtime"
+version = "0.0.0"
+dependencies = [
+ "minicov 0.3.9",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,7 +132,7 @@ dependencies = [
 [[package]]
 name = "ckmg"
 version = "0.0.0"
-source = "git+https://github.com/corbet-foss/ckmg?branch=main#286372e10d436ddd05d5218a0dab96a750246919"
+source = "git+https://github.com/corbet-foss/ckmg?branch=main#08c47d7495b67dc28a795075d9d6ebb65667f663"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -151,6 +159,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 name = "cnvl"
 version = "0.0.0"
 dependencies = [
+ "browser-coverage-runtime",
  "chacha20poly1305",
  "ckmg",
  "serde",
@@ -410,6 +419,15 @@ name = "minicov"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
+dependencies = [
+ "cc",
+ "walkdir",
+]
+
+[[package]]
+name = "minicov"
+version = "0.3.9"
+source = "git+https://github.com/Amanieu/minicov?branch=master#03886b886ce16b9309ddd38e4824970e70fc0588"
 dependencies = [
  "cc",
  "walkdir",
@@ -751,7 +769,7 @@ dependencies = [
  "cast",
  "js-sys",
  "libm",
- "minicov",
+ "minicov 0.3.8",
  "nu-ansi-term",
  "num-traits",
  "oorandom",
