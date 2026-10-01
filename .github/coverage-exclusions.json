@@ -1,0 +1,16 @@
+[
+  {
+    "file": "src/lib.rs",
+    "line": 121,
+    "source": ".map_err(|_| Error::Authentication)?,",
+    "reason": "The checked 72-byte ckmg XChaCha envelope authenticates to exactly 32 plaintext bytes; this conversion error is unreachable without an upstream contract defect.",
+    "evidence": "docs/COVERAGE.md#unreachable-defensive-mappings"
+  },
+  {
+    "file": "src/lib.rs",
+    "line": 207,
+    "source": ".map_err(|_| Error::Authentication)?;",
+    "reason": "RustCrypto XChaCha20-Poly1305 encryption only rejects inputs exceeding its counter bound; the prior 1 MiB bound is smaller. Allocation failure aborts rather than returning this error.",
+    "evidence": "docs/COVERAGE.md#unreachable-defensive-mappings"
+  }
+]
