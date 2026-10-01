@@ -9,7 +9,8 @@ for entry in exclusions:
     assert entry['reason'] and entry['evidence'], 'exclusion requires a rationale and evidence'
     source = Path(path).read_text().splitlines()
     assert source[line - 1].strip() == entry['source'], 'exclusion source moved; review it again'
-    allowed[(path, line)] = entry
+    if (sys.argv[2] if len(sys.argv) > 2 else "native") in entry.get("targets", ["native", "wasm"]):
+        allowed[(path, line)] = entry
 seen = set()
 lines = branches = hit_lines = hit_branches = 0
 misses = []

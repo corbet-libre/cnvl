@@ -22,6 +22,8 @@ fn key() -> SealKey {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn round_trip_exact_bytes_and_vault_custody() {
+    #[cfg(all(target_arch = "wasm32", owned_browser_coverage))]
+    let _ = browser_coverage_runtime::__owned_test_module_signature();
     let signed = b" { \"payload\": \"exact original signed bytes\" } ";
     let (envelope, reader) = seal(key(), context(), signed, &mut SystemEntropy).unwrap();
     assert!(envelope.matches_context(&context()));
