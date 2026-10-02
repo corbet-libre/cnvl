@@ -2,27 +2,25 @@
 
 ## Scope
 
-**Purpose and home.** Seal and open exact signed private-profile bytes with
-established authenticated encryption, under `cmsg → cbrd → cnvl`.
+### Purpose
 
-**Owns.** A one-use key per envelope, fresh nonce, bounded wire format and context
-binding for format, suite, community, owner, profile revision, schema revision and
-key generation. An opening-only read key may be wrapped for storage or delivered
-through an already authorized encrypted peer channel.
+Seals and opens the private profile with established authenticated encryption bound to its context.
 
-**Never.** Decides key recipients; sends keys through the forum; accepts ciphertext
-for another community, profile or revision; admits an unchecked profile; compresses
-or pads; implements a cryptographic primitive.
+### Owns
 
-**States and ports.** Empty → Sealed(revision, key generation); opening yields
-AuthenticatedBytes or Refused. Ports are `seal`, `open`, `from_bytes`, and read-key
-`wrap`, `unwrap`, `deliver`. Access decisions belong to Exchange. Profile supplies
-already compressed and padded bytes.
+A one-use key per envelope, a fresh nonce, a bounded wire format, and authenticated context covering format, suite, community, owner, profile and schema revision, and key generation. An opening-only read key may be wrapped for storage or delivered over an already authorized encrypted peer channel.
 
-**Invariants and tests.** Private values and keys never enter forum traffic.
-Native and actual browser vectors preserve exact signed bytes, prevent key/nonce
-reuse and refuse changed context, tag or ciphertext and old-publication splicing.
-Reachable source lines and branches require full coverage.
+### Never
+
+Decides who receives keys; sends keys through `cfrm`; accepts ciphertext bound to another community, profile, or revision; returns an unchecked profile as admitted; compresses or pads data; implements a cryptographic primitive.
+
+### States
+
+Empty becomes Sealed for a given revision and key generation; opening yields authenticated bytes or a refusal. The ports are `seal`, `open`, `from_bytes`, and read-key `wrap`, `unwrap`, and `deliver`.
+
+### Test obligations
+
+Native and browser builds share identical test vectors with full line and branch coverage. Tests prove fresh keys and nonces, reject modified context, tags, or ciphertext, preserve exact signed bytes, prevent old ciphertext from being swapped under a newer publication, and keep private values and keys out of server fixtures and error output.
 
 ## Implementation
 
