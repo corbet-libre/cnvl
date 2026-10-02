@@ -4,7 +4,8 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
 };
-use ckmg::{Entropy, passkey::StoreCipher};
+mod custody;
+pub use custody::{Custodian, KeyTransfer, TransferContext, WrappedReadKey};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -70,78 +71,28 @@ impl std::fmt::Debug for Context {
     }
 }
 
-/// One-use profile sealing capability. Custody creates it, Envelope consumes it.
-/// It cannot be cloned, serialized or reused for a second encryption.
+/// A private opening capability bound to the Keys-lent custody that created or
+/// restored it. Neither raw import/export nor caller-selected wrapping is exposed.
+///
 /// ```compile_fail
-/// fn reuse(key: cnvl::SealKey) { let _first = key; let _second = key; }
+/// fn extract(key: &cnvl::ReadKey<'_>) { let _ = &key.secret; }
 /// ```
-pub struct SealKey(Zeroizing<[u8; 32]>);
-impl SealKey {
-    /// Generate an independent per-envelope purpose key inside trusted custody.
-    pub fn generate(entropy: &mut impl Entropy) -> Result<Self, Error> {
-        let mut secret = Zeroizing::new([0; 32]);
-        entropy
-            .fill(secret.as_mut())
-            .map_err(|_| Error::Randomness)?;
-        Ok(Self(secret))
-    }
-}
-
-/// An opening-only capability pinned to exactly one publication context.
-/// Its bytes are available only to an injected encrypted peer-key transport.
-pub struct ReadKey {
+/// ```compile_fail
+/// fn rekey(key: &cnvl::ReadKey<'_>, chosen: &[u8; 32]) { key.wrap(chosen); }
+/// ```
+/// ```compile_fail
+/// let _ = cnvl::ReadKey::receive(zeroize::Zeroizing::new([7; 32]));
+/// ```
+pub struct ReadKey<'key> {
     secret: Zeroizing<[u8; 32]>,
     context: Context,
+    custody: custody::Binding<'key>,
 }
-impl ReadKey {
-    /// Accept one key already decrypted by the peer-key transport. This performs no
-    /// access-rule evaluation; Exchange must authenticate and authorize that transport.
-    pub fn receive(secret: Zeroizing<[u8; 32]>, context: Context) -> Result<Self, Error> {
-        context.aad()?;
-        Ok(Self { secret, context })
-    }
-    /// Wrap for vault persistence using Keys' opaque capability.
-    pub fn wrap(&self, cipher: &StoreCipher, entropy: &mut impl Entropy) -> Result<Vec<u8>, Error> {
-        cipher
-            .seal(entropy, &self.context.aad()?, self.secret.as_slice())
-            .map_err(|_| Error::Authentication)
-    }
-    /// Restore an opening capability for an exact context. It cannot seal new content.
-    pub fn unwrap(cipher: &StoreCipher, context: Context, wrapped: &[u8]) -> Result<Self, Error> {
-        if wrapped.len() != 72 {
-            return Err(Error::Limit);
-        }
-        let bytes = cipher
-            .open(&context.aad()?, wrapped)
-            .map_err(|_| Error::Authentication)?;
-        let secret = Zeroizing::new(
-            bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::Authentication)?,
-        );
-        Ok(Self { secret, context })
-    }
-    /// Hand this narrowly scoped key to an authorized encrypted peer transport.
-    /// No root, PRF or general-purpose storage secret is available to this port.
-    pub fn deliver<T: KeyRecipient>(&self, recipient: &mut T) -> Result<T::Output, Error> {
-        recipient.seal_key(&self.context, &self.secret)
-    }
-}
-impl std::fmt::Debug for ReadKey {
+impl std::fmt::Debug for ReadKey<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ReadKey([redacted])")
     }
 }
-/// Trusted peer transport capability. The implementation must encrypt to the
-/// already-authorized requester; Envelope neither grants nor checks access rules.
-pub trait KeyRecipient {
-    /// Encrypted transport result, never a plaintext key in a public door response.
-    type Output;
-    /// Seal this one profile key, bound to its complete publication context.
-    fn seal_key(&mut self, context: &Context, key: &[u8; 32]) -> Result<Self::Output, Error>;
-}
-
 /// An authenticated envelope after `open`, or untrusted ciphertext before it.
 /// Decoding is possible only through the bounded constructor.
 /// ```compile_fail
@@ -194,22 +145,20 @@ impl Wire {
         Ok(())
     }
 }
-/// Consume a one-use key and authenticate exact packed/padded signed bytes. A fresh
-/// 192-bit nonce comes from trusted CSPRNG entropy; no caller-selected nonce exists.
-pub fn seal(
-    key: SealKey,
+fn seal_bound<'key>(
+    custody: custody::Binding<'key>,
     context: Context,
     bytes: &[u8],
-    entropy: &mut impl Entropy,
-) -> Result<(Envelope, ReadKey), Error> {
+) -> Result<(Envelope, ReadKey<'key>), Error> {
     if bytes.len() > MAX_PLAINTEXT_BYTES {
         return Err(Error::Limit);
     }
     let aad = context.aad()?;
+    let mut secret = Zeroizing::new([0; 32]);
+    getrandom::fill(secret.as_mut()).map_err(|_| Error::Randomness)?;
     let mut nonce = [0; 24];
-    entropy.fill(&mut nonce).map_err(|_| Error::Randomness)?;
-    let cipher = XChaCha20Poly1305::new(&(*key.0).into());
-    let ciphertext = cipher
+    getrandom::fill(&mut nonce).map_err(|_| Error::Randomness)?;
+    let ciphertext = XChaCha20Poly1305::new(&(*secret).into())
         .encrypt(
             &XNonce::from(nonce),
             Payload {
@@ -219,8 +168,9 @@ pub fn seal(
         )
         .map_err(|_| Error::Authentication)?;
     let reader = ReadKey {
-        secret: key.0,
+        secret,
         context: context.clone(),
+        custody,
     };
     Ok((
         Envelope(Wire {
@@ -236,7 +186,7 @@ pub fn seal(
 /// expansion and verifies the exact full cgrd bundle; this is never an admission.
 pub fn open(
     envelope: &Envelope,
-    key: &ReadKey,
+    key: &ReadKey<'_>,
     expected: &Context,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     envelope.0.validate()?;
