@@ -1,10 +1,5 @@
 //! Real encryption, exact-byte and custody vectors on native and Wasm.
-use ckmg::{
-    Entropy, SystemEntropy,
-    passkey::{PrfOutput, store_cipher},
-};
-use cnvl::{Context, Envelope, Error, ReadKey, SealKey, open, seal};
-use zeroize::Zeroizing;
+use cnvl::{Context, Custodian, Envelope, Error, WrappedReadKey, open};
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 fn context() -> Context {
@@ -16,8 +11,15 @@ fn context() -> Context {
         key_generation: 1,
     }
 }
-fn key() -> SealKey {
-    SealKey::generate(&mut SystemEntropy).unwrap()
+fn custody() -> Custodian<'static> {
+    Custodian::from_keys(
+        &[1; 32],
+        &[2; 32],
+        "test-community",
+        "test-pseudonym",
+        [3; 32],
+    )
+    .unwrap()
 }
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -25,7 +27,7 @@ fn round_trip_exact_bytes_and_vault_custody() {
     #[cfg(all(target_arch = "wasm32", owned_browser_coverage))]
     let _ = browser_coverage_runtime::__owned_test_module_signature();
     let signed = b" { \"payload\": \"exact original signed bytes\" } ";
-    let (envelope, reader) = seal(key(), context(), signed, &mut SystemEntropy).unwrap();
+    let (envelope, reader) = custody().seal(context(), signed).unwrap();
     assert!(envelope.matches_context(&context()));
     let mut other_context = context();
     other_context.profile_revision += 1;
@@ -36,15 +38,15 @@ fn round_trip_exact_bytes_and_vault_custody() {
         open(&envelope, &reader, &context()).unwrap().as_slice(),
         signed
     );
-    let other = seal(key(), context(), signed, &mut SystemEntropy)
+    let other = custody()
+        .seal(context(), signed)
         .unwrap()
         .0
         .to_bytes()
         .unwrap();
     assert_ne!(wire, other);
-    let cipher = store_cipher(&PrfOutput::from_bytes(&[1; 32]).unwrap(), "test-community").unwrap();
-    let wrapped = reader.wrap(&cipher, &mut SystemEntropy).unwrap();
-    let restored = ReadKey::unwrap(&cipher, context(), &wrapped).unwrap();
+    let wrapped = reader.wrap().unwrap();
+    let restored = custody().restore(context(), &wrapped).unwrap();
     assert_eq!(
         open(&envelope, &restored, &context()).unwrap().as_slice(),
         signed
@@ -60,14 +62,14 @@ fn round_trip_exact_bytes_and_vault_custody() {
         Err(Error::Context)
     ));
     assert!(matches!(
-        ReadKey::unwrap(&cipher, changed, &wrapped),
+        custody().restore(changed, &wrapped),
         Err(Error::Authentication)
     ));
     assert!(matches!(
-        ReadKey::unwrap(&cipher, context(), b"short"),
+        WrappedReadKey::from_bytes(b"short"),
         Err(Error::Limit)
     ));
-    let wrong = ReadKey::receive(Zeroizing::new([9; 32]), context()).unwrap();
+    let (_, wrong) = custody().seal(context(), b"unrelated").unwrap();
     assert!(matches!(
         open(&envelope, &wrong, &context()),
         Err(Error::Authentication)
@@ -76,7 +78,7 @@ fn round_trip_exact_bytes_and_vault_custody() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn every_context_component_and_format_is_bound() {
-    let (envelope, reader) = seal(key(), context(), b"signed", &mut SystemEntropy).unwrap();
+    let (envelope, reader) = custody().seal(context(), b"signed").unwrap();
     let wire = envelope.to_bytes().unwrap();
     for field in [
         "community",
@@ -127,31 +129,30 @@ fn every_context_component_and_format_is_bound() {
         Err(Error::Limit)
     ));
 }
-struct FailedEntropy;
-impl Entropy for FailedEntropy {
-    fn fill(&mut self, _: &mut [u8]) -> Result<(), ckmg::Error> {
-        Err(ckmg::Error::Randomness)
-    }
-}
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn bounds_and_entropy_fail_closed() {
+fn bounds_and_wrong_custody_fail_closed() {
     assert!(matches!(
-        SealKey::generate(&mut FailedEntropy),
-        Err(Error::Randomness)
-    ));
-    assert!(matches!(
-        seal(key(), context(), b"x", &mut FailedEntropy),
-        Err(Error::Randomness)
-    ));
-    assert!(matches!(
-        seal(
-            key(),
-            context(),
-            &vec![0; cnvl::MAX_PLAINTEXT_BYTES + 1],
-            &mut SystemEntropy
-        ),
+        custody().seal(context(), &vec![0; cnvl::MAX_PLAINTEXT_BYTES + 1]),
         Err(Error::Limit)
+    ));
+    let (_, key) = custody().seal(context(), b"x").unwrap();
+    let wrapped = key.wrap().unwrap();
+    let wrong = Custodian::from_keys(
+        &[1; 32],
+        &[99; 32],
+        "test-community",
+        "test-pseudonym",
+        [3; 32],
+    )
+    .unwrap();
+    assert!(matches!(
+        wrong.restore(context(), &wrapped),
+        Err(Error::Authentication)
+    ));
+    assert!(matches!(
+        WrappedReadKey::from_bytes(&[0; 73]),
+        Err(Error::Context)
     ));
     for n in 0..7 {
         let mut c = context();
@@ -164,51 +165,23 @@ fn bounds_and_entropy_fail_closed() {
             5 => c.schema_revision = 0,
             _ => c.key_generation = 0,
         }
-        assert!(matches!(
-            seal(key(), c, b"x", &mut SystemEntropy),
-            Err(Error::Context)
-        ));
+        assert!(matches!(custody().seal(c, b"x"), Err(Error::Context)));
     }
 }
 
-// This transport uses the real opaque wrapping capability; no plaintext key is returned.
-struct EncryptedRecipient(ckmg::passkey::StoreCipher);
-impl cnvl::KeyRecipient for EncryptedRecipient {
-    type Output = Vec<u8>;
-    fn seal_key(&mut self, context: &Context, key: &[u8; 32]) -> Result<Vec<u8>, Error> {
-        let aad = serde_json::to_vec(context).unwrap();
-        self.0
-            .seal(&mut SystemEntropy, &aad, key)
-            .map_err(|_| Error::Authentication)
-    }
-}
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn encrypted_delivery_and_remaining_bounds() {
-    let (envelope, reader) = seal(key(), context(), b"signed", &mut SystemEntropy).unwrap();
-    let cipher = store_cipher(&PrfOutput::from_bytes(&[7; 32]).unwrap(), "test-community").unwrap();
-    let mut recipient = EncryptedRecipient(cipher);
-    let delivered = reader.deliver(&mut recipient).unwrap();
-    let bytes = recipient
-        .0
-        .open(&serde_json::to_vec(&context()).unwrap(), &delivered)
-        .unwrap();
-    let received = ReadKey::receive(
-        Zeroizing::new(bytes.as_slice().try_into().unwrap()),
-        context(),
-    )
-    .unwrap();
+fn encrypted_local_custody_and_remaining_bounds() {
+    let (envelope, reader) = custody().seal(context(), b"signed").unwrap();
+    let wrapped = reader.wrap().unwrap();
+    let received = custody().restore(context(), &wrapped).unwrap();
     assert_eq!(
         open(&envelope, &received, &context()).unwrap().as_slice(),
         b"signed"
     );
-    assert!(matches!(
-        reader.wrap(&recipient.0, &mut FailedEntropy),
-        Err(Error::Authentication)
-    ));
     let mut changed = context();
     changed.profile_revision = 2;
-    let different_context = ReadKey::receive(Zeroizing::new([7; 32]), changed).unwrap();
+    let (_, different_context) = custody().seal(changed, b"other").unwrap();
     assert!(matches!(
         open(&envelope, &different_context, &context()),
         Err(Error::Context)
@@ -216,11 +189,7 @@ fn encrypted_delivery_and_remaining_bounds() {
     let mut invalid = context();
     invalid.owner.clear();
     assert!(matches!(
-        ReadKey::receive(Zeroizing::new([7; 32]), invalid.clone()),
-        Err(Error::Context)
-    ));
-    assert!(matches!(
-        ReadKey::unwrap(&recipient.0, invalid, &[0; 72]),
+        custody().restore(invalid, &wrapped),
         Err(Error::Context)
     ));
     let mut value: serde_json::Value =
@@ -230,13 +199,9 @@ fn encrypted_delivery_and_remaining_bounds() {
         Envelope::from_bytes(&serde_json::to_vec(&value).unwrap()),
         Err(Error::Limit)
     ));
-    let (maximum, reader) = seal(
-        key(),
-        context(),
-        &vec![5; cnvl::MAX_PLAINTEXT_BYTES],
-        &mut SystemEntropy,
-    )
-    .unwrap();
+    let (maximum, reader) = custody()
+        .seal(context(), &vec![5; cnvl::MAX_PLAINTEXT_BYTES])
+        .unwrap();
     assert_eq!(
         open(&maximum, &reader, &context()).unwrap().len(),
         cnvl::MAX_PLAINTEXT_BYTES

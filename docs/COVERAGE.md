@@ -17,13 +17,14 @@ is an open requirement, never evidence of complete coverage.
 The gate reads LLVM LCOV line/branch evidence, with exactly two defensive error
 mapping lines excluded. They remain in production as fail-closed safeguards:
 
-- `ReadKey::unwrap`: the input must be 72 bytes before ckmg opens it. Its
-  construction is a 24-byte nonce, a 32-byte secret and a 16-byte Poly1305 tag.
+- `Custodian::reader`: local wrapping authenticates exactly 72 bytes (24-byte
+  nonce, 32-byte secret, 16-byte tag); HPKE authenticates exactly48 ciphertext
+  bytes (32-byte secret, 16-byte tag).
   Successful authentication therefore gives precisely 32 bytes. A conversion
   error would require an upstream size-contract defect. The native and browser
   custody vector performs real wrapping, restoration, wrong-context and bad-length
   refusals, and opens the original envelope after restoration.
-- `seal`: RustCrypto `chacha20poly1305` encryption rejects message sizes beyond
+- `seal_bound`: RustCrypto `chacha20poly1305` encryption rejects message sizes beyond
   the ChaCha block counter bound. The public 1 MiB precondition is smaller by
   several orders of magnitude. The real maximum-size vector and over-limit
   refusal run on native and browser. Allocation failure aborts and does not
@@ -94,3 +95,6 @@ The same execution also exports LLVM annotated source. Every emitted LCOV line
 location and its covered/uncovered state must match that independent listing.
 This rejects a removed DA record even when generic-instantiation totals differ
 from source totals. The original annotation and raw JSON remain available.
+
+The two existing exclusions moved with their original operations; no new exclusions
+were added for the new custody/HPKE code. Its full measured coverage is still OPEN.
