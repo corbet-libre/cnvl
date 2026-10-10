@@ -18,7 +18,7 @@ missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(owned_browser_coverage)"] }
 
 [dependencies]
-cgrd = { git = "https://git.corbet.ch/corbet-foss/cgrd.git", branch = "v01", default-features = false }
+cgrd = { git = "https://git.corbet.ch/corbet-foss/cgrd", branch = "main", default-features = false }
 hpke = { version = "0.14", default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"] }
 getrandom = "0.4"
 rand_chacha = "0.10"
