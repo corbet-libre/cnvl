@@ -90,6 +90,41 @@ impl<'key> Custodian<'key> {
         self.reader(context, plain)
     }
 
+    /// Adopt a profile key a member handed to a room as an MLS application
+    /// message. `sender` is the MLS sender's pseudonym, authenticated by the
+    /// group; the key is accepted only if it belongs to exactly that member and
+    /// this community. Epoch and room membership are the caller's checks. The
+    /// returned key is stored with [`ReadKey::wrap_room`] only: a room-scoped
+    /// grant, which the owner drops when that member leaves or is removed.
+    pub fn adopt_room(
+        &self,
+        handover: &RoomHandover,
+        sender: &str,
+    ) -> Result<ReadKey<'key>, Error> {
+        self.0.scope(&handover.context)?;
+        if handover.context.owner != sender || sender == self.0.member {
+            return Err(Error::Context);
+        }
+        self.reader(
+            handover.context.clone(),
+            Zeroizing::new(handover.secret.to_vec()),
+        )
+    }
+
+    /// Restore a room-scoped grant under this custody, the original context and
+    /// the same room (group). A personal wrap never opens here, nor the reverse.
+    pub fn restore_room(
+        &self,
+        context: Context,
+        group: &[u8; 32],
+        wrapped: &WrappedReadKey,
+    ) -> Result<ReadKey<'key>, Error> {
+        self.0.scope(&context)?;
+        let aad = self.0.room_wrap_aad(&context, group)?;
+        let plain = open_wrapped(self.0.wrapping, &aad, &wrapped.0[1..])?;
+        self.reader(context, plain)
+    }
+
     /// Migrate the exact former StoreCipher wire format (24-byte nonce + AEAD of
     /// 32 bytes). Keys supplies its private legacy wrapping key internally. Only
     /// an opaque ReadKey bound to NEW custody is returned; no plaintext import.
@@ -178,6 +213,17 @@ impl Binding<'_> {
         }
         Ok(())
     }
+    fn room_wrap_aad(&self, context: &Context, group: &[u8; 32]) -> Result<Vec<u8>, Error> {
+        self.scope(context)?;
+        serde_json::to_vec(&(
+            "cnvl.read-key.room-wrap.v1",
+            &self.community,
+            &self.member,
+            group,
+            context,
+        ))
+        .map_err(|_| Error::Context)
+    }
     fn wrap_aad(&self, context: &Context) -> Result<Vec<u8>, Error> {
         self.scope(context)?;
         serde_json::to_vec(&(
@@ -195,6 +241,31 @@ impl ReadKey<'_> {
     /// can redirect this wrapping to an attacker-selected storage key.
     pub fn wrap(&self) -> Result<WrappedReadKey, Error> {
         let aad = self.custody.wrap_aad(&self.context)?;
+        self.wrap_bound(&aad)
+    }
+
+    /// Persist a key adopted from a room, bound to that room (group): it opens
+    /// only through [`Custodian::restore_room`] for the same group, so removing
+    /// the record when the member leaves is the whole of dropping the grant.
+    pub fn wrap_room(&self, group: &[u8; 32]) -> Result<WrappedReadKey, Error> {
+        let aad = self.custody.room_wrap_aad(&self.context, group)?;
+        self.wrap_bound(&aad)
+    }
+
+    /// The profile owner's own key as a room hand-over, to be sent as an MLS
+    /// application message in the epoch of admission. Only the owner's custody
+    /// can make it, and only for a key of its own profile.
+    pub fn room_handover(&self) -> Result<RoomHandover, Error> {
+        if self.context.owner != self.custody.member {
+            return Err(Error::Context);
+        }
+        Ok(RoomHandover {
+            context: self.context.clone(),
+            secret: self.secret.clone(),
+        })
+    }
+
+    fn wrap_bound(&self, aad: &[u8]) -> Result<WrappedReadKey, Error> {
         let mut nonce = [0; 24];
         getrandom::fill(&mut nonce).map_err(|_| Error::Randomness)?;
         let ciphertext = XChaCha20Poly1305::new(self.custody.wrapping.into())
@@ -202,7 +273,7 @@ impl ReadKey<'_> {
                 &XNonce::from(nonce),
                 Payload {
                     msg: self.secret.as_slice(),
-                    aad: &aad,
+                    aad,
                 },
             )
             .map_err(|_| Error::Authentication)?;
@@ -404,4 +475,56 @@ fn open_wrapped(key: &[u8; 32], aad: &[u8], bytes: &[u8]) -> Result<Zeroizing<Ve
         )
         .map(Zeroizing::new)
         .map_err(|_| Error::Authentication)
+}
+
+/// A profile key on its way into a room's MLS application message: the key and
+/// the exact context it opens. It is secret material; it has no Clone, no
+/// Debug output and zeroizes on drop. The MLS group, not this type, protects it.
+pub struct RoomHandover {
+    context: Context,
+    secret: Zeroizing<[u8; 32]>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomHandoverWire {
+    version: u8,
+    context: Context,
+    secret: Vec<u8>,
+}
+impl RoomHandover {
+    /// The context (owner, revision, key generation) this key opens.
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+    /// Bounded bytes for the application message.
+    pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.context.aad()?;
+        serde_json::to_vec(&RoomHandoverWire {
+            version: 1,
+            context: self.context.clone(),
+            secret: self.secret.to_vec(),
+        })
+        .map(Zeroizing::new)
+        .map_err(|_| Error::Context)
+    }
+    /// Reject unknown version, shape or size before retaining untrusted bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() > 4096 {
+            return Err(Error::Limit);
+        }
+        let wire: RoomHandoverWire = serde_json::from_slice(bytes).map_err(|_| Error::Context)?;
+        if wire.version != 1 {
+            return Err(Error::Context);
+        }
+        wire.context.aad()?;
+        Ok(Self {
+            context: wire.context,
+            secret: Zeroizing::new(wire.secret.try_into().map_err(|_| Error::Context)?),
+        })
+    }
+}
+impl std::fmt::Debug for RoomHandover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RoomHandover([redacted])")
+    }
 }

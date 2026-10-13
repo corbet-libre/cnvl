@@ -207,3 +207,57 @@ fn encrypted_local_custody_and_remaining_bounds() {
         cnvl::MAX_PLAINTEXT_BYTES
     );
 }
+
+fn member(name: &str, byte: u8) -> Custodian<'static> {
+    let (hpke, wrapping): (&'static [u8; 32], &'static [u8; 32]) = if byte == 7 {
+        (&[7; 32], &[8; 32])
+    } else {
+        (&[9; 32], &[10; 32])
+    };
+    Custodian::from_keys(hpke, wrapping, "test-community", name, [byte; 32]).unwrap()
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn a_room_grant_is_adopted_only_from_its_owner_and_is_scoped_to_the_room() {
+    use cnvl::RoomHandover;
+    let (envelope, owner_key) = custody().seal(context(), b"profile").unwrap();
+    let handover = owner_key.room_handover().unwrap();
+    let bytes = handover.to_bytes().unwrap();
+    let received = RoomHandover::from_bytes(&bytes).unwrap();
+    assert_eq!(format!("{received:?}"), "RoomHandover([redacted])");
+    assert!(received.context() == &context());
+    let reader = member("other-pseudonym", 7);
+    // Only the MLS sender that owns the key may hand it over; never your own.
+    assert!(reader.adopt_room(&received, "someone-else").is_err());
+    assert!(
+        member("test-pseudonym", 9)
+            .adopt_room(&received, "test-pseudonym")
+            .is_err()
+    );
+    let adopted = reader.adopt_room(&received, "test-pseudonym").unwrap();
+    assert_eq!(
+        open(&envelope, &adopted, &context()).unwrap().as_slice(),
+        b"profile"
+    );
+    // Only the owner can make a hand-over, and only of its own key.
+    assert!(adopted.room_handover().is_err());
+    // Stored room-scoped: it restores for that room only, never as a personal key.
+    let room = [5; 32];
+    let wrapped = adopted.wrap_room(&room).unwrap();
+    let restored = reader.restore_room(context(), &room, &wrapped).unwrap();
+    assert_eq!(
+        open(&envelope, &restored, &context()).unwrap().as_slice(),
+        b"profile"
+    );
+    assert!(reader.restore_room(context(), &[6; 32], &wrapped).is_err());
+    assert!(reader.restore(context(), &wrapped).is_err());
+    assert!(
+        reader
+            .restore_room(context(), &room, &adopted.wrap().unwrap())
+            .is_err()
+    );
+    // Malformed or oversized hand-overs are refused before use.
+    assert!(RoomHandover::from_bytes(b"{}").is_err());
+    assert!(RoomHandover::from_bytes(&[b' '; 5000]).is_err());
+}

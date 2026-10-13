@@ -5,7 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
 };
 mod custody;
-pub use custody::{Custodian, KeyTransfer, TransferContext, WrappedReadKey};
+pub use custody::{Custodian, KeyTransfer, RoomHandover, TransferContext, WrappedReadKey};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
