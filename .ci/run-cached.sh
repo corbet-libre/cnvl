@@ -22,46 +22,11 @@ exec 9>"$state/lock"
 flock -w "${CI_TIMEOUT:-2700}" 9
 mkdir -p "$state/moon-cache/hashes" "$state/moon-cache/outputs" "$state/moon-home"
 mkdir -p .moon/cache
+ln -sfn "$state/moon-cache/hashes" .moon/cache/hashes
+ln -sfn "$state/moon-cache/outputs" .moon/cache/outputs
 tool_source=github:NixOS/nixpkgs/b7c2ada94fe99c15b0dbcf4d11fd7850b957a436
-tool_paths=$(nix build --no-link --print-out-paths "$tool_source#moon" "$tool_source#proto" "$tool_source#curl" "$tool_source#nodejs_24" "$tool_source#wasm-pack" "$tool_source#chromedriver" "$tool_source#chromium" "$tool_source#clang" "$tool_source#cargo-llvm-cov")
+tool_paths=$(nix build --no-link --print-out-paths "$tool_source#moon" "$tool_source#proto" "$tool_source#python3" "$tool_source#curl" "$tool_source#nodejs_24" "$tool_source#wasm-pack" "$tool_source#chromedriver" "$tool_source#chromium" "$tool_source#clang")
 for path in $tool_paths; do PATH="$path/bin:$PATH"; done
-# minicov's build script hardcodes `clang`, so every wasm32 C build uses
-# whatever `clang` resolves on PATH (currently the x86_64 nix wrapper, which
-# breaks on host glibc headers). Resolve the pinned unwrapped compiler here
-# (actual closure path from Nix at runtime, never a hardcoded store path) and
-# export it for the cache fingerprint + the wasm legs in verify.sh. It stays
-# off the global PATH so native builds keep the wrapper.
-CNVL_WASM_CLANG_BIN=""
-for out in $(nix build --no-link --print-out-paths "$tool_source#llvmPackages.clang-unwrapped"); do
-  if [ -x "$out/bin/clang" ]; then CNVL_WASM_CLANG_BIN="$out/bin"; fi
-done
-test -n "$CNVL_WASM_CLANG_BIN" || { echo 'pinned unwrapped clang provides no bin/clang' >&2; exit 2; }
-export CNVL_WASM_CLANG_BIN
-export CNVL_WASM_CLANG="$CNVL_WASM_CLANG_BIN/clang"
-"$CNVL_WASM_CLANG" --version
-# requirements.txt needs selenium plus pip; the pinned python alone provides
-# neither as usable modules here (pip probe failed), so supply a pinned
-# python3.withPackages env (selenium plus transitive deps and pip). Same
-# nixpkgs revision; no PyPI round trip while the import succeeds.
-python_env=$(nix build --no-link --print-out-paths --impure --expr '(builtins.getFlake "'"$tool_source"'").legacyPackages.${builtins.currentSystem}.python3.withPackages (p: [ p.selenium p.pip ])')
-test -n "$python_env" || { echo 'nix python selenium env resolution failed' >&2; exit 2; }
-PATH="$python_env/bin:$PATH"
-python3 -c 'import selenium; print(selenium.__version__)'
-# .github/requirements.txt floor (>=4.49) exceeds the pinned selenium
-# (4.40.0): build an isolated job-local venv and install the real
-# requirements there. Runs on Crow outside the cached checks; fails closed
-# (no downgrade to the older base).
-export RUNNER_TEMP="${RUNNER_TEMP:-$(mktemp -d)}"
-VENV="$RUNNER_TEMP/selenium-venv"
-# --without-pip: pip always comes from the base env (below) via system site;
-# this skips ensurepip entirely so venv creation cannot fail on it.
-python3 -m venv --system-site-packages --without-pip "$VENV"
-VENV_PY="$VENV/bin/python"
-"$VENV_PY" -m pip --version
-"$VENV_PY" -m pip install -r .github/requirements.txt
-"$VENV_PY" -c 'import selenium; print(selenium.__version__)'
-PATH="$VENV/bin:$PATH"
-python3 -m pip freeze
 export PROTO_HOME="$toolchains/proto" RUSTUP_HOME="$toolchains/rustup"
 export CARGO_HOME="$toolchains/cargo" MOON_HOME="$state/moon-home"
 export PROTO_AUTO_CLEAN=false PROTO_TELEMETRY=false PROTO_YES=true
@@ -70,13 +35,15 @@ export PATH="$(dirname "$CCID_BIN"):$CARGO_HOME/bin:$PROTO_HOME/shims:$PROTO_HOM
 export CI_JOBS="${CI_JOBS:-2}" CARGO_BUILD_JOBS="${CI_JOBS:-2}"
 export RUST_TEST_THREADS="${CI_TEST_THREADS:-2}"
 export CARGO_NET_GIT_FETCH_WITH_CLI=true
-# Append to any git config the verified runtime already supplies through the environment.
-git_config_base=${GIT_CONFIG_COUNT:-0}
-export GIT_CONFIG_COUNT=$((git_config_base + 2))
-export "GIT_CONFIG_KEY_$((git_config_base + 0))=url.https://git.corbet.ch/corbet-libs/.insteadOf"
-export "GIT_CONFIG_VALUE_$((git_config_base + 0))=https://github.com/corbet-libs/"
-export "GIT_CONFIG_KEY_$((git_config_base + 1))=url.https://git.corbet.ch/corbet-foss/.insteadOf"
-export "GIT_CONFIG_VALUE_$((git_config_base + 1))=https://github.com/corbet-foss/"
+if [ -n "${GIT_CONFIG_COUNT:-}" ]; then
+  echo 'GIT_CONFIG_COUNT is already set; refusing to overwrite job git config' >&2
+  exit 2
+fi
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0='url.https://git.corbet.ch/corbet-libs/.insteadOf'
+export GIT_CONFIG_VALUE_0='https://github.com/corbet-libs/'
+export GIT_CONFIG_KEY_1='url.https://git.corbet.ch/corbet-foss/.insteadOf'
+export GIT_CONFIG_VALUE_1='https://github.com/corbet-foss/'
 # Shared-first toolchain lock: production base helper verbatim (no MSRV extra;
 # hosted uses stable only; nightly coverage rides the same gate->main flow).
 TOOLCHAIN_LOCK_FILE="$toolchains/install.lock"
@@ -95,12 +62,6 @@ export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
 export ARTIFACT_ROOT="${ARTIFACT_ROOT:-$state/release-artifacts}"
 mkdir -p "$ARTIFACT_ROOT"
 [[ "$ARTIFACT_ROOT" = /* ]] || { echo "ARTIFACT_ROOT must be absolute" >&2; exit 2; }
-# CI resolves google-chrome from PATH; provide the pinned chromium behind that
-# name (fingerprint and browser legs rely on it). Job-state dir, no host change.
-mkdir -p "$state/chrome-shim"
-printf '#!/bin/sh\nexec chromium "$@"\n' > "$state/chrome-shim/google-chrome"
-chmod +x "$state/chrome-shim/google-chrome"
-export PATH="$state/chrome-shim:$PATH"
 export SOURCE_SHA256="$(git archive --format=tar HEAD | sha256sum | cut -d ' ' -f 1)"
 export CCID_SOURCE_REVISION="$CI_COMMIT_SHA"
 "$CCID_BIN" render --repo "$PWD" --check
