@@ -14,6 +14,7 @@ touch "$GITHUB_PATH"
 python3 .github/scripts/check-lock.py
 python3 .github/scripts/test-lock.py
 rustc --version --verbose
+bash .ci/update-our-crates.sh
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
