@@ -32,7 +32,7 @@ python3 .github/scripts/check-coverage.py coverage.lcov coverage.json coverage.t
 clang --version
 version=$(python3 -c "import tomllib; print(next(p['version'] for p in tomllib.load(open('Cargo.lock','rb'))['package'] if p['name']=='wasm-bindgen'))")
 wb_archive="wasm-bindgen-${version}-x86_64-unknown-linux-musl.tar.gz"
-wb_base="https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}"
+wb_base="${WASM_BINDGEN_DOWNLOAD_BASE:-https://github.com/wasm-bindgen/wasm-bindgen/releases/download}/${version}"
 mkdir -p "$RUNNER_TEMP/wasm-bindgen-cli"
 (cd "$RUNNER_TEMP/wasm-bindgen-cli" && curl --fail --location --retry 3 --remote-name "$wb_base/$wb_archive" && curl --fail --location --retry 3 --remote-name "$wb_base/$wb_archive.sha256sum" && wb_checksum=$(cut -d ' ' -f1 "$wb_archive.sha256sum") && printf '%s  %s\n' "$wb_checksum" "$wb_archive" | sha256sum --check && tar -xzf "$wb_archive" --strip-components=1)
 export PATH="$RUNNER_TEMP/wasm-bindgen-cli:$PATH"
